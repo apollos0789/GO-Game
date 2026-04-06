@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>台續圍棋研究室 - Go Lab</title>
+    <style>
+        :root {
+            --board-bg: #e3bc7d;
+            --panel-bg: #f8f9fa;
+            --text-dark: #2d3436;
+        }
+        body { 
+            margin: 0; background: #dfe6e9; 
+            display: flex; flex-direction: column; align-items: center; 
+            font-family: "微軟正黑體", sans-serif; height: 100vh; overflow: hidden;
+        }
+
+        .controls {
+            width: 100%; max-width: 500px; padding: 10px;
+            display: flex; justify-content: space-around; background: var(--panel-bg);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 10;
+        }
+        button, select {
+            padding: 8px 12px; border: 2px solid var(--text-dark);
+            background: white; cursor: pointer; font-weight: bold; border-radius: 6px;
+        }
+        button.active { background: var(--text-dark); color: white; }
+
+        .status-bar {
+            margin: 10px 0; display: flex; gap: 15px; font-weight: bold; align-items: center;
+        }
+        .player-info { 
+            padding: 8px 15px; border-radius: 25px; border: 2px solid #ccc; background: white;
+            transition: all 0.3s; font-size: 14px;
+        }
+        .player-info.active-black { border-color: #000; background: #2d3436; color: white; }
+        .player-info.active-white { border-color: #999; background: #fff; color: #000; }
+
+        #game-outer {
+            padding: 20px; background: var(--board-bg); border: 2px solid #5d4037;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2); border-radius: 4px;
+        }
+        #game-container { position: relative; width: 85vw; max-width: 450px; aspect-ratio: 1/1; }
+        canvas { width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+
+        .toolbar { margin-top: 15px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+        .mode-selector { background: #ffeaa7; border-color: #fdcb6e; }
+        .version { position: absolute; bottom: 5px; right: 10px; font-size: 10px; color: #636e72; }
+    </style>
+</head>
+<body>
+
+<div class="controls">
+    <button onclick="changeSize(9)" id="btn-9">9x9</button>
+    <button onclick="changeSize(13)" id="btn-13">13x13</button>
+    <button onclick="changeSize(19)" id="btn-19" class="active">19x19</button>
+</div>
+
+<div class="status-bar">
+    <div id="info-black" class="player-info active-black">黑棋 提子: 0</div>
+    <select id="playMode" class="mode-selector" onchange="updateStatus()">
+        <option value="auto">🔄 正常對弈</option>
+        <option value="black">⚫ 連續黑棋</option>
+        <option value="white">⚪ 連續白棋</option>
+    </select>
+    <div id="info-white" class="player-info">白棋 提子: 0</div>
+</div>
+
+<div id="game-outer">
+    <div id="game-container">
+        <canvas id="goBoard"></canvas>
+    </div>
+</div>
+
+<div class="toolbar">
+    <button onclick="undo()">悔棋 (Undo)</button>
+    <button onclick="toggleNumbers()" id="btn-num">顯示手數: 關</button>
+    <button onclick="resetGame()" style="color: #d63031; border-color: #d63031;">清空</button>
+</div>
+
+<div class="version">v26.0406.2 | Made by 吳啓弘(小吳)</div>
+
+<script>
+const canvas = document.getElementById('goBoard');
+const ctx = canvas.getContext('2d');
+const infoBlack = document.getElementById('info-black');
+const infoWhite = document.getElementById('info-white');
+const playModeSelect = document.getElementById('playMode');
+
+let boardSize = 19;
+let board = []; 
+let history = []; 
+let currentPlayer = 1; 
+let captures = { 1: 0, 2: 0 }; 
+let showNumbers = false;
+let lastMove = null;
+
+function initBoard() {
+    board = Array(boardSize).fill().map(() => Array(boardSize).fill(0));
+    history = []; currentPlayer = 1; captures = { 1: 0, 2: 0 }; lastMove = null;
+    updateStatus(); render();
+}
+
+function changeSize(size) {
+    boardSize = size;
+    document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
+    document.getElementById(`btn-${size}`).classList.add('active');
+    initBoard();
+}
+
+function render() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    const padding = 25;
+    const cellSize = (rect.width - padding * 2) / (boardSize - 1);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    ctx.strokeStyle = "#2d3436"; ctx.fillStyle = "#636e72";
+    ctx.font = `${Math.max(10, cellSize*0.4)}px Arial`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const labels = "ABCDEFGHJKLMNOPQRST".split(""); 
+
+    for (let i = 0; i < boardSize; i++) {
+        let pos = padding + i * cellSize;
+        ctx.beginPath(); ctx.lineWidth = 1;
+        ctx.moveTo(pos, padding); ctx.lineTo(pos, rect.height - padding);
+        ctx.moveTo(padding, pos); ctx.lineTo(rect.width - padding, pos);
+        ctx.stroke();
+        ctx.fillText(labels[i], pos, padding - 15);
+        ctx.fillText(labels[i], pos, rect.height - padding + 15);
+        ctx.fillText(boardSize - i, padding - 15, pos);
+        ctx.fillText(boardSize - i, rect.width - padding + 15, pos);
+    }
+
+    const stars = getStarPoints(boardSize);
+    stars.forEach(p => {
+        ctx.beginPath(); ctx.arc(padding + p.x * cellSize, padding + p.y * cellSize, cellSize * 0.12, 0, Math.PI * 2);
+        ctx.fillStyle = "#2d3436"; ctx.fill();
+    });
+
+    for (let y = 0; y < boardSize; y++) {
+        for (let x = 0; x < boardSize; x++) {
+            if (board[y][x] !== 0) drawStone(x, y, board[y][x], cellSize, padding);
+        }
+    }
+
+    if (lastMove) {
+        ctx.beginPath(); ctx.strokeStyle = lastMove.p === 1 ? "#fff" : "#000"; ctx.lineWidth = 2;
+        ctx.arc(padding + lastMove.x * cellSize, padding + lastMove.y * cellSize, cellSize * 0.2, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+}
+
+function drawStone(x, y, player, cellSize, padding) {
+    const px = padding + x * cellSize; const py = padding + y * cellSize;
+    const radius = cellSize * 0.46;
+    ctx.beginPath(); ctx.arc(px + 1, py + 1, radius, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,0.3)"; ctx.fill();
+
+    const grad = ctx.createRadialGradient(px - radius/3, py - radius/3, radius/10, px, py, radius);
+    if (player === 1) { grad.addColorStop(0, "#636e72"); grad.addColorStop(1, "#000000"); }
+    else { grad.addColorStop(0, "#ffffff"); grad.addColorStop(1, "#d1d1d1"); }
+    ctx.beginPath(); ctx.arc(px, py, radius, 0, Math.PI * 2);
+    ctx.fillStyle = grad; ctx.fill();
+
+    if (showNumbers) {
+        const step = history.findIndex(h => h.x === x && h.y === y && !h.isBackward) + 1;
+        if (step > 0) {
+            ctx.fillStyle = player === 1 ? "#fff" : "#000";
+            ctx.font = `bold ${cellSize * 0.5}px Arial`; ctx.fillText(step, px, py);
+        }
+    }
+}
+
+function getStarPoints(size) {
+    if (size === 9) return [{x:2,y:2},{x:6,y:2},{x:4,y:4},{x:2,y:6},{x:6,y:6}];
+    if (size === 13) return [{x:3,y:3},{x:9,y:3},{x:6,y:6},{x:3,y:9},{x:9,y:9}];
+    if (size === 19) {
+        let pts = []; [3, 9, 15].forEach(y => [3, 9, 15].forEach(x => pts.push({x, y})));
+        return pts;
+    }
+    return [];
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const padding = 25;
+    const cellSize = (rect.width - padding * 2) / (boardSize - 1);
+    const x = Math.round((e.offsetX - padding) / cellSize);
+    const y = Math.round((e.offsetY - padding) / cellSize);
+
+    if (x >= 0 && x < boardSize && y >= 0 && y < boardSize && board[y][x] === 0) {
+        executeMove(x, y);
+    }
+});
+
+function executeMove(x, y) {
+    const mode = playModeSelect.value;
+    let actingPlayer = currentPlayer;
+    if (mode === 'black') actingPlayer = 1;
+    else if (mode === 'white') actingPlayer = 2;
+
+    const opponent = actingPlayer === 1 ? 2 : 1;
+    let tempBoard = board.map(row => [...row]);
+    tempBoard[y][x] = actingPlayer;
+
+    let capturedStones = [];
+    const neighbors = [{x:x+1,y:y}, {x:x-1,y:y}, {x:x,y:y+1}, {x:x,y:y-1}];
+    neighbors.forEach(n => {
+        if (n.x>=0 && n.x<boardSize && n.y>=0 && n.y<boardSize && tempBoard[n.y][n.x] === opponent) {
+            const group = getGroup(n.x, n.y, tempBoard);
+            if (group.liberties === 0) {
+                group.stones.forEach(s => { tempBoard[s.y][s.x] = 0; capturedStones.push(s); });
+            }
+        }
+    });
+
+    const myGroup = getGroup(x, y, tempBoard);
+    if (myGroup.liberties === 0 && capturedStones.length === 0) return;
+
+    // 紀錄歷史
+    history.push({ x, y, p: actingPlayer, boardBefore: board.map(row => [...row]), captured: capturedStones, isCapture: capturedStones.length > 0 });
+    
+    board = tempBoard;
+    captures[actingPlayer] += capturedStones.length;
+    lastMove = {x, y, p: actingPlayer};
+    
+    // 如果是自動對弈模式，則切換玩家
+    if (mode === 'auto') currentPlayer = opponent;
+    else currentPlayer = actingPlayer; // 維持當前顏色，但邏輯上可讓 UI 知道誰在動
+
+    updateStatus();
+    render();
+}
+
+function getGroup(startX, startY, targetBoard) {
+    const color = targetBoard[startY][startX];
+    const stones = []; const queue = [{x: startX, y: startY}];
+    const visited = new Set();
+    while (queue.length > 0) {
+        const {x, y} = queue.shift();
+        const key = `${x},${y}`;
+        if (visited.has(key)) continue;
+        visited.add(key); stones.push({x, y});
+        const neighbors = [{x:x+1,y:y}, {x:x-1,y:y}, {x:x,y:y+1}, {x:x,y:y-1}];
+        neighbors.forEach(n => {
+            if (n.x>=0 && n.x<boardSize && n.y>=0 && n.y<boardSize) {
+                if (targetBoard[n.y][n.x] === color && !visited.has(`${n.x},${n.y}`)) queue.push(n);
+            }
+        });
+    }
+    const libertyCoords = new Set();
+    stones.forEach(s => {
+        [{x:s.x+1,y:s.y}, {x:s.x-1,y:s.y}, {x:s.x,y:s.y+1}, {x:s.x,y:s.y-1}].forEach(n => {
+            if (n.x>=0 && n.x<boardSize && n.y>=0 && n.y<boardSize && targetBoard[n.y][n.x] === 0) libertyCoords.add(`${n.x},${n.y}`);
+        });
+    });
+    return { stones, liberties: libertyCoords.size };
+}
+
+function undo() {
+    if (history.length === 0) return;
+    const last = history.pop();
+    board = last.boardBefore;
+    captures[last.p] -= last.captured.length;
+    currentPlayer = last.p;
+    const prevMove = history.slice(-1)[0];
+    lastMove = prevMove ? {x: prevMove.x, y: prevMove.y, p: prevMove.p} : null;
+    updateStatus(); render();
+}
+
+function toggleNumbers() {
+    showNumbers = !showNumbers;
+    document.getElementById('btn-num').innerText = `顯示手數: ${showNumbers ? '開' : '關'}`;
+    render();
+}
+
+function updateStatus() {
+    const mode = playModeSelect.value;
+    infoBlack.innerText = `黑棋 提子: ${captures[1]}`;
+    infoWhite.innerText = `白棋 提子: ${captures[2]}`;
+    
+    // UI 高亮邏輯
+    let highlightBlack = (mode === 'auto' && currentPlayer === 1) || mode === 'black';
+    let highlightWhite = (mode === 'auto' && currentPlayer === 2) || mode === 'white';
+    
+    infoBlack.className = `player-info ${highlightBlack ? 'active-black' : ''}`;
+    infoWhite.className = `player-info ${highlightWhite ? 'active-white' : ''}`;
+}
+
+function resetGame() { if(confirm("確定要清空棋盤嗎？")) initBoard(); }
+window.addEventListener('resize', render);
+initBoard();
+</script>
+</body>
+</html>
